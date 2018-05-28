@@ -74,10 +74,15 @@ class TextMateLanguageMode {
   //
   // Returns a {Number}.
   suggestedIndentForBufferRow (bufferRow, tabLength, options) {
-    return this._suggestedIndentForTokenizedLineAtBufferRow(
+    const line = this.buffer.lineForRow(bufferRow)
+    const tokenizedLine = this.tokenizedLineForRow(bufferRow)
+    const iterator = tokenizedLine.getTokenIterator()
+    iterator.next()
+    const scopeDescriptor = new ScopeDescriptor({scopes: iterator.getScopes()})
+    return this._suggestedIndentForLineWithScopeAtBufferRow(
       bufferRow,
-      this.buffer.lineForRow(bufferRow),
-      this.tokenizedLineForRow(bufferRow),
+      line,
+      scopeDescriptor,
       tabLength,
       options
     )
@@ -90,10 +95,14 @@ class TextMateLanguageMode {
   //
   // Returns a {Number}.
   suggestedIndentForLineAtBufferRow (bufferRow, line, tabLength) {
-    return this._suggestedIndentForTokenizedLineAtBufferRow(
+    const tokenizedLine = this.buildTokenizedLineForRowWithText(bufferRow, line)
+    const iterator = tokenizedLine.getTokenIterator()
+    iterator.next()
+    const scopeDescriptor = new ScopeDescriptor({scopes: iterator.getScopes()})
+    return this._suggestedIndentForLineWithScopeAtBufferRow(
       bufferRow,
       line,
-      this.buildTokenizedLineForRowWithText(bufferRow, line),
+      scopeDescriptor,
       tabLength
     )
   }
@@ -111,7 +120,7 @@ class TextMateLanguageMode {
     const currentIndentLevel = this.indentLevelForLine(line, tabLength)
     if (currentIndentLevel === 0) return
 
-    const scopeDescriptor = this.scopeDescriptorForPosition([bufferRow, 0])
+    const scopeDescriptor = this.scopeDescriptorForPosition(new Point(bufferRow, 0))
     const decreaseIndentRegex = this.decreaseIndentRegexForScopeDescriptor(scopeDescriptor)
     if (!decreaseIndentRegex) return
 
@@ -138,11 +147,7 @@ class TextMateLanguageMode {
     return desiredIndentLevel
   }
 
-  _suggestedIndentForTokenizedLineAtBufferRow (bufferRow, line, tokenizedLine, tabLength, options) {
-    const iterator = tokenizedLine.getTokenIterator()
-    iterator.next()
-    const scopeDescriptor = new ScopeDescriptor({scopes: iterator.getScopes()})
-
+  _suggestedIndentForLineWithScopeAtBufferRow (bufferRow, line, scopeDescriptor, tabLength, options) {
     const increaseIndentRegex = this.increaseIndentRegexForScopeDescriptor(scopeDescriptor)
     const decreaseIndentRegex = this.decreaseIndentRegexForScopeDescriptor(scopeDescriptor)
     const decreaseNextIndentRegex = this.decreaseNextIndentRegexForScopeDescriptor(scopeDescriptor)
@@ -600,7 +605,7 @@ class TextMateLanguageMode {
 
     for (let row = point.row - 1; row >= 0; row--) {
       const endRow = this.endRowForFoldAtRow(row, tabLength)
-      if (endRow != null && endRow > point.row) {
+      if (endRow != null && endRow >= point.row) {
         return Range(Point(row, Infinity), Point(endRow, Infinity))
       }
     }

@@ -20,6 +20,17 @@ describe('TextEditor', () => {
     await atom.packages.activatePackage('language-javascript')
   })
 
+  it('generates unique ids for each editor', async () => {
+    // Deserialized editors are initialized with the serialized id. We can
+    // initialize an editor with what we expect to be the next id:
+    const deserialized = new TextEditor({id: editor.id+1})
+    expect(deserialized.id).toEqual(editor.id+1)
+
+    // The id generator should skip the id used up by the deserialized one:
+    const fresh = new TextEditor()
+    expect(fresh.id).toNotEqual(deserialized.id)
+  })
+
   describe('when the editor is deserialized', () => {
     it('restores selections and folds based on markers in the buffer', async () => {
       editor.setSelectedBufferRange([[1, 2], [3, 4]])
@@ -2365,6 +2376,19 @@ describe('TextEditor', () => {
           ])
         })
       })
+
+      it('does not create a new selection if it would be fully contained within another selection', () => {
+        editor.setText('abc\ndef\nghi\njkl\nmno')
+        editor.setCursorBufferPosition([0, 1])
+
+        let addedSelectionCount = 0
+        editor.onDidAddSelection(() => { addedSelectionCount++ })
+
+        editor.addSelectionBelow()
+        editor.addSelectionBelow()
+        editor.addSelectionBelow()
+        expect(addedSelectionCount).toBe(3)
+      })
     })
 
     describe('.addSelectionAbove()', () => {
@@ -2486,6 +2510,19 @@ describe('TextEditor', () => {
             [[9, 0], [9, 0]]
           ])
         })
+      })
+
+      it('does not create a new selection if it would be fully contained within another selection', () => {
+        editor.setText('abc\ndef\nghi\njkl\nmno')
+        editor.setCursorBufferPosition([4, 1])
+
+        let addedSelectionCount = 0
+        editor.onDidAddSelection(() => { addedSelectionCount++ })
+
+        editor.addSelectionAbove()
+        editor.addSelectionAbove()
+        editor.addSelectionAbove()
+        expect(addedSelectionCount).toBe(3)
       })
     })
 
@@ -3496,13 +3533,16 @@ describe('TextEditor', () => {
       })
 
       describe("when the undo option is set to 'skip'", () => {
-        beforeEach(() => editor.setSelectedBufferRange([[1, 2], [1, 2]]))
-
-        it('does not undo the skipped operation', () => {
-          let range = editor.insertText('x')
-          range = editor.insertText('y', {undo: 'skip'})
+        it('groups the change with the previous change for purposes of undo and redo', () => {
+          editor.setSelectedBufferRanges([
+            [[0, 0], [0, 0]],
+            [[1, 0], [1, 0]]
+          ])
+          editor.insertText('x')
+          editor.insertText('y', {undo: 'skip'})
           editor.undo()
-          expect(buffer.lineForRow(1)).toBe('  yvar sort = function(items) {')
+          expect(buffer.lineForRow(0)).toBe('var quicksort = function () {')
+          expect(buffer.lineForRow(1)).toBe('  var sort = function(items) {')
         })
       })
     })
@@ -5153,6 +5193,111 @@ describe('TextEditor', () => {
       })
     })
 
+    describe('undo/redo restore selections of editor which initiated original change', () => {
+      let editor1, editor2
+
+      beforeEach(async () => {
+        editor1 = editor
+        editor2 = new TextEditor({buffer: editor1.buffer})
+
+        editor1.setText(dedent `
+          aaaaaa
+          bbbbbb
+          cccccc
+          dddddd
+          eeeeee
+        `)
+      })
+
+      it('[editor.transact] restore selection of change-initiated-editor', () => {
+        editor1.setCursorBufferPosition([0, 0]); editor1.transact(() => editor1.insertText('1'))
+        editor2.setCursorBufferPosition([1, 0]); editor2.transact(() => editor2.insertText('2'))
+        editor1.setCursorBufferPosition([2, 0]); editor1.transact(() => editor1.insertText('3'))
+        editor2.setCursorBufferPosition([3, 0]); editor2.transact(() => editor2.insertText('4'))
+
+        expect(editor1.getText()).toBe(dedent `
+          1aaaaaa
+          2bbbbbb
+          3cccccc
+          4dddddd
+          eeeeee
+        `)
+
+        editor2.setCursorBufferPosition([4, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([3, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([2, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([1, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([0, 0])
+        expect(editor2.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([0, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([1, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([2, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([3, 1])
+        expect(editor2.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor1.setCursorBufferPosition([4, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([3, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([2, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([1, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([0, 0])
+        expect(editor1.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([0, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([1, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([2, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([3, 1])
+        expect(editor1.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+      })
+
+      it('[manually group checkpoint] restore selection of change-initiated-editor', () => {
+        const transact = (editor, fn) => {
+          const checkpoint = editor.createCheckpoint()
+          fn()
+          editor.groupChangesSinceCheckpoint(checkpoint)
+        }
+
+        editor1.setCursorBufferPosition([0, 0]); transact(editor1, () => editor1.insertText('1'))
+        editor2.setCursorBufferPosition([1, 0]); transact(editor2, () => editor2.insertText('2'))
+        editor1.setCursorBufferPosition([2, 0]); transact(editor1, () => editor1.insertText('3'))
+        editor2.setCursorBufferPosition([3, 0]); transact(editor2, () => editor2.insertText('4'))
+
+        expect(editor1.getText()).toBe(dedent `
+          1aaaaaa
+          2bbbbbb
+          3cccccc
+          4dddddd
+          eeeeee
+        `)
+
+        editor2.setCursorBufferPosition([4, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([3, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([2, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([1, 0])
+        editor1.undo(); expect(editor1.getCursorBufferPosition()).toEqual([0, 0])
+        expect(editor2.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([0, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([1, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([2, 1])
+        editor1.redo(); expect(editor1.getCursorBufferPosition()).toEqual([3, 1])
+        expect(editor2.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor1.setCursorBufferPosition([4, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([3, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([2, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([1, 0])
+        editor2.undo(); expect(editor2.getCursorBufferPosition()).toEqual([0, 0])
+        expect(editor1.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([0, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([1, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([2, 1])
+        editor2.redo(); expect(editor2.getCursorBufferPosition()).toEqual([3, 1])
+        expect(editor1.getCursorBufferPosition()).toEqual([4, 0]) // remain unchanged
+      })
+    })
+
     describe('when the buffer is changed (via its direct api, rather than via than edit session)', () => {
       it('moves the cursor so it is in the same relative position of the buffer', () => {
         expect(editor.getCursorScreenPosition()).toEqual([0, 0])
@@ -5343,6 +5488,195 @@ describe('TextEditor', () => {
         })
       })
     })
+
+    describe('when readonly', () => {
+      beforeEach(() => {
+        editor.setReadOnly(true)
+      })
+
+      const modifications = [
+        {
+          name: 'moveLineUp',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([1, 0])
+            editor.moveLineUp(opts)
+          }
+        },
+        {
+          name: 'moveLineDown',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([0, 0])
+            editor.moveLineDown(opts)
+          }
+        },
+        {
+          name: 'insertText',
+          op: (opts = {}) => {
+            editor.setSelectedBufferRange([[1, 0], [1, 2]])
+            editor.insertText('xxx', opts)
+          }
+        },
+        {
+          name: 'insertNewline',
+          op: (opts = {}) => {
+            editor.setCursorScreenPosition({row: 1, column: 0})
+            editor.insertNewline(opts)
+          }
+        },
+        {
+          name: 'insertNewlineBelow',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([0, 2])
+            editor.insertNewlineBelow(opts)
+          }
+        },
+        {
+          name: 'insertNewlineAbove',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([0])
+            editor.insertNewlineAbove(opts)
+          }
+        },
+        {
+          name: 'backspace',
+          op: (opts = {}) => {
+            editor.setCursorScreenPosition({row: 1, column: 7})
+            editor.backspace(opts)
+          }
+        },
+        {
+          name: 'deleteToPreviousWordBoundary',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([0, 16])
+            editor.deleteToPreviousWordBoundary(opts)
+          }
+        },
+        {
+          name: 'deleteToNextWordBoundary',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([0, 15])
+            editor.deleteToNextWordBoundary(opts)
+          }
+        },
+        {
+          name: 'deleteToBeginningOfWord',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([1, 24])
+            editor.deleteToBeginningOfWord(opts)
+          }
+        },
+        {
+          name: 'deleteToEndOfLine',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([1, 24])
+            editor.deleteToEndOfLine(opts)
+          }
+        },
+        {
+          name: 'deleteToBeginningOfLine',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([1, 24])
+            editor.deleteToBeginningOfLine(opts)
+          }
+        },
+        {
+          name: 'delete',
+          op: (opts = {}) => {
+            editor.setCursorScreenPosition([1, 6])
+            editor.delete(opts)
+          }
+        },
+        {
+          name: 'deleteToEndOfWord',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([1, 24])
+            editor.deleteToEndOfWord(opts)
+          }
+        },
+        {
+          name: 'indent',
+          op: (opts = {}) => {
+            editor.indent(opts)
+          }
+        },
+        {
+          name: 'cutSelectedText',
+          op: (opts = {}) => {
+            editor.setSelectedBufferRanges([[[0, 4], [0, 13]], [[1, 6], [1, 10]]])
+            editor.cutSelectedText(opts)
+          }
+        },
+        {
+          name: 'cutToEndOfLine',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([2, 20])
+            editor.cutToEndOfLine(opts)
+          }
+        },
+        {
+          name: 'cutToEndOfBufferLine',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([2, 20])
+            editor.cutToEndOfBufferLine(opts)
+          }
+        },
+        {
+          name: 'pasteText',
+          op: (opts = {}) => {
+            editor.setSelectedBufferRanges([[[0, 4], [0, 13]], [[1, 6], [1, 10]]])
+            atom.clipboard.write('first')
+            editor.pasteText(opts)
+          }
+        },
+        {
+          name: 'indentSelectedRows',
+          op: (opts = {}) => {
+            editor.setSelectedBufferRange([[0, 3], [0, 3]])
+            editor.indentSelectedRows(opts)
+          }
+        },
+        {
+          name: 'outdentSelectedRows',
+          op: (opts = {}) => {
+            editor.setSelectedBufferRange([[1, 3], [1, 3]])
+            editor.outdentSelectedRows(opts)
+          }
+        },
+        {
+          name: 'autoIndentSelectedRows',
+          op: (opts = {}) => {
+            editor.setCursorBufferPosition([2, 0])
+            editor.insertText('function() {\ninside=true\n}\n  i=1\n', opts)
+            editor.getLastSelection().setBufferRange([[2, 0], [6, 0]])
+            editor.autoIndentSelectedRows(opts)
+          }
+        },
+        {
+          name: 'undo/redo',
+          op: (opts = {}) => {
+            editor.insertText('foo', opts)
+            editor.undo(opts)
+            editor.redo(opts)
+          }
+        }
+      ]
+
+      describe('without bypassReadOnly', () => {
+        for (const {name, op} of modifications) {
+          it(`throws an error on ${name}`, () => {
+            expect(op).toThrow()
+          })
+        }
+      })
+
+      describe('with bypassReadOnly', () => {
+        for (const {name, op} of modifications) {
+          it(`permits ${name}`, () => {
+            op({bypassReadOnly: true})
+          })
+        }
+      })
+    })
   })
 
   describe('reading text', () => {
@@ -5385,6 +5719,34 @@ describe('TextEditor', () => {
       editor.deleteLine()
       expect(buffer.lineForRow(0)).toBe(line2)
       expect(buffer.getLineCount()).toBe(count - 2)
+    })
+
+    it("restores cursor position for multiple cursors", () => {
+      const line = '0123456789'.repeat(8)
+      editor.setText((line + '\n').repeat(5))
+      editor.setCursorScreenPosition([0, 5])
+      editor.addCursorAtScreenPosition([2, 8])
+      editor.deleteLine()
+
+      const cursors = editor.getCursors()
+      expect(cursors.length).toBe(2)
+      expect(cursors[0].getScreenPosition()).toEqual([0, 5])
+      expect(cursors[1].getScreenPosition()).toEqual([1, 8])
+    })
+
+    it("restores cursor position for multiple selections", () => {
+      const line = '0123456789'.repeat(8)
+      editor.setText((line + '\n').repeat(5))
+      editor.setSelectedBufferRanges([
+       [[0, 5], [0, 8]],
+       [[2, 4], [2, 15]]
+      ])
+      editor.deleteLine()
+
+      const cursors = editor.getCursors()
+      expect(cursors.length).toBe(2)
+      expect(cursors[0].getScreenPosition()).toEqual([0, 5])
+      expect(cursors[1].getScreenPosition()).toEqual([1, 4])
     })
 
     it('deletes a line only once when multiple selections are on the same line', () => {
@@ -6677,6 +7039,14 @@ describe('TextEditor', () => {
 
   afterEach(() => {
     editor.destroy()
+  })
+
+  describe('.scopeDescriptorForBufferPosition(position)', () => {
+    it('returns a default scope descriptor when no language mode is assigned', () => {
+      editor = new TextEditor({buffer: new TextBuffer()})
+      const scopeDescriptor = editor.scopeDescriptorForBufferPosition([0, 0])
+      expect(scopeDescriptor.getScopesArray()).toEqual(['text'])
+    })
   })
 
   describe('.shouldPromptToSave()', () => {

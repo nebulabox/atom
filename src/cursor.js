@@ -524,7 +524,7 @@ class Cursor extends Model {
       : new Range(new Point(position.row, 0), position)
 
     const ranges = this.editor.buffer.findAllInRangeSync(
-      options.wordRegex || this.wordRegExp(),
+      options.wordRegex || this.wordRegExp(options),
       scanRange
     )
 
@@ -556,7 +556,7 @@ class Cursor extends Model {
       : new Range(position, new Point(position.row, Infinity))
 
     const ranges = this.editor.buffer.findAllInRangeSync(
-      options.wordRegex || this.wordRegExp(),
+      options.wordRegex || this.wordRegExp(options),
       scanRange
     )
 
@@ -664,7 +664,7 @@ class Cursor extends Model {
   // Returns a {RegExp}.
   wordRegExp (options) {
     const nonWordCharacters = _.escapeRegExp(this.getNonWordCharacters())
-    let source = `^[\t\r ]*$|[^\\s${nonWordCharacters}]+`
+    let source = `^[\t ]*$|[^\\s${nonWordCharacters}]+`
     if (!options || options.includeNonWordCharacters !== false) {
       source += `|${`[${nonWordCharacters}]+`}`
     }
